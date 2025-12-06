@@ -12,14 +12,14 @@ VOICE = "en-US-GuyNeural"
 OUTPUT_FILE = "output/brainrot_final.mp4"
 TEMP_DIR = "temp"
 TEMP_AUDIO = os.path.join(TEMP_DIR, "temp_audio.mp3")
-TEMP_WAV = os.path.join(TEMP_DIR, "temp_audio.wav") # Used for stable ffmpeg rendering
+TEMP_WAV = os.path.join(TEMP_DIR, "temp_audio.wav") 
 TEMP_SUBS = os.path.join(TEMP_DIR, "temp_subs.ass")
 ASSETS_DIR = "assets"
 BG_VIDEO = os.path.join(ASSETS_DIR, "sub.mp4")
 
 # --- STYLE SETTINGS ---
 FONT = "Arial Rounded MT Bold" 
-FONT_SIZE = 80            
+FONT_SIZE = 75           
 OUTLINE_WIDTH = 4         
 
 # Colors
@@ -35,7 +35,6 @@ class BrainrotGenerator:
         """
         Generates MP3, extracts timestamps, and CONVERTS to WAV.
         """
-        # TEST_VOICE = "en-US-AriaNeural" # Use Aria if Guy has timestamp issues
         TEST_VOICE = "en-US-GuyNeural"
         print(f"🎤 Generating TTS with voice: {TEST_VOICE}...")
         
@@ -89,27 +88,21 @@ class BrainrotGenerator:
             current_time += time_per_word
         return fallback_data
 
-    def chunk_words(self, words, max_chars=22): # Slightly smaller chunks for better vertical fit
+    def chunk_words(self, words, words_per_chunk=8): 
+        """
+        Strictly grabs 'words_per_chunk' words to create pages.
+        Defaults to 8 (so we can split into 4 words + 4 words).
+        """
         chunks = []
-        current_chunk = []
-        current_len = 0
-        for w in words:
-            word_len = len(w['word'])
-            if current_len + word_len > max_chars and current_chunk:
-                chunks.append(current_chunk)
-                current_chunk = []
-                current_len = 0
-            current_chunk.append(w)
-            current_len += word_len + 1 
-        if current_chunk:
-            chunks.append(current_chunk)
+        for i in range(0, len(words), words_per_chunk):
+            chunks.append(words[i : i + words_per_chunk])
         return chunks
 
     def generate_ass_subtitles(self, word_data):
         """
-        Generates ASS with fixed positioning and seamless transitions.
+        Generates ASS with 2-line layout, 60:40 positioning, and seamless timing.
         """
-        # Alignment 5 = Top Center (legacy) or Center. We force position with \pos anyway.
+        # Header setup
         header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -123,46 +116,52 @@ Style: Default,{FONT},{FONT_SIZE},{COLOR_WHITE},{COLOR_BLACK},{COLOR_BLACK},{COL
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
         events = []
-        chunks = self.chunk_words(word_data, max_chars=20) 
+        
+        # 1. Chunk words (Targeting 8 words total -> 2 lines of 4)
+        chunks = self.chunk_words(word_data, words_per_chunk=8)
         
         for c_idx, chunk in enumerate(chunks):
-            # --- LOGIC TO BRIDGE THE GAP ---
-            # Determine exactly when this Chunk page should disappear.
+            # --- SEAMLESS TIMING LOGIC ---
+            # The chunk stays on screen until the NEXT chunk starts.
             if c_idx < len(chunks) - 1:
-                # If there is a next chunk, this chunk stays until the exact moment the next one starts.
-                # This prevents the gap/blinking effect.
                 chunk_end_time = chunks[c_idx + 1][0]['start']
             else:
-                # If it's the last chunk, hold it for 1 second after speech ends.
                 chunk_end_time = chunk[-1]['end'] + 1.0
+
+            # Calculate where to split the lines (e.g., after word 4)
+            split_index = math.ceil(len(chunk) / 2)
 
             for i, active_word in enumerate(chunk):
                 start_t = active_word['start']
                 
-                # Determine when the HIGHLIGHT moves (not the text itself)
+                # Highlight timing
                 if i < len(chunk) - 1:
                     end_t = chunk[i+1]['start']
                 else:
-                    # If it's the last word in this chunk, the highlight stays
-                    # until the chunk is replaced by the next chunk.
                     end_t = chunk_end_time
 
-                # Build the text with Highlight tags
+                # --- BUILD TEXT WITH 2 LINES & HIGHLIGHT ---
                 line_parts = []
-                for w in chunk:
+                for w_idx, w in enumerate(chunk):
+                    # Insert Line Break if we reached the split index
+                    if w_idx == split_index:
+                        line_parts.append("\\N") # \N is ASS code for New Line
+
                     text = w['word'].replace('{', '\\{').replace('}', '\\}')
+                    
                     if w == active_word:
                         line_parts.append(f"{{\\1c{COLOR_YELLOW}}}{text}{{\\1c{COLOR_WHITE}}}")
                     else:
                         line_parts.append(text)
                 
                 final_text = " ".join(line_parts)
-                
-                # --- POSITION LOCK ---
-                # \an5 = Align Center
-                # \pos(540, 960) = Exact center of 1080x1920 canvas.
-                # This ensures the text never jumps up/down.
-                final_text = f"{{\\an5}}{{\\pos(540,960)}}{final_text}"
+                # Cleanup: " \N " might happen, let's make it clean "\N"
+                final_text = final_text.replace(" \\N ", "\\N")
+
+                # --- POSITIONING ---
+                # \an5 = Align Center (horizontally)
+                # \pos(540, 1150) = Center X (540), 60% Down Y (1150 of 1920)
+                final_text = f"{{\\an5}}{{\\pos(540,1150)}}{final_text}"
 
                 ass_start = self._format_time(start_t)
                 ass_end = self._format_time(end_t)
@@ -189,12 +188,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         print("🎬 Rendering Final Video with FFmpeg...")
         subs_path = os.path.abspath(TEMP_SUBS).replace('\\', '/').replace(':', '\\:')
         
-        # Use TEMP_WAV (Input 1) to ensure audio length is detected correctly
         cmd = [
             "ffmpeg", "-y",
             "-stream_loop", "-1",       
-            "-i", self.background_path, # [0] Video
-            "-i", TEMP_WAV,             # [1] Audio (WAV)
+            "-i", self.background_path, 
+            "-i", TEMP_WAV,             
             "-vf", f"crop=ih*(9/16):ih:(iw-ow)/2:0,ass='{subs_path}'", 
             "-map", "0:v",              
             "-map", "1:a",              
@@ -235,8 +233,6 @@ if __name__ == "__main__":
     else:
         user_text = "The mitochondrial powerhouse of the cell is not just a meme, it is a biological reality. We are going to learn about biology today."
     
-    # Uppercase for Brainrot aesthetic
-    user_text = user_text.upper()
     
     generator = BrainrotGenerator()
     asyncio.run(generator.run(user_text))
